@@ -115,6 +115,7 @@ void do_proxy(ws_ctx_t *ws_ctx, int target) {
         if (FD_ISSET(target, &wlist)) {
             len = tout_end-tout_start;
             bytes = send(target, ws_ctx->tout_buf + tout_start, len, 0);
+        //    handler_msg("tcp send %d bytes (actually sent: %d)\n", len, bytes);
             if (pipe_error) { break; }
             if (bytes < 0) {
                 handler_emsg("target connection error: %s\n",
@@ -149,7 +150,8 @@ void do_proxy(ws_ctx_t *ws_ctx, int target) {
         }
 
         if (FD_ISSET(target, &rlist)) {
-            bytes = recv(target, ws_ctx->cin_buf, DBUFSIZE , 0);
+            bytes = recv(target, ws_ctx->cin_buf, DBUFSIZE(ws_ctx->opcode) , 0);
+    //        handler_msg("tcp receive %d bytes \n", bytes);
             if (pipe_error) { break; }
             if (bytes <= 0) {
                 handler_emsg("target closed connection\n");

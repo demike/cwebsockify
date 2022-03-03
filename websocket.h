@@ -1,7 +1,11 @@
 #include <openssl/ssl.h>
 
-#define BUFSIZE 65536
-#define DBUFSIZE (BUFSIZE * 3) / 4 - 20
+#define BUFSIZE 65536*2
+
+#define DBUFSIZE_TEXT (65536 * 3) / 4 - 20 //(BUFSIZE * 3) / 4 - 20
+#define DBUFSIZE_BIN 65536 - 8 // - 4 byte header - 4 byte mask
+
+#define DBUFSIZE(OPCODE)  (OPCODE == OPCODE_TEXT) ? DBUFSIZE_TEXT : DBUFSIZE_BIN
 
 #define SERVER_HANDSHAKE_HIXIE "HTTP/1.1 101 Web Socket Protocol Handshake\r\n\
 Upgrade: WebSocket\r\n\

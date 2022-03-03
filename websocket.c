@@ -88,7 +88,9 @@ ssize_t ws_recv(ws_ctx_t *ctx, void *buf, size_t len) {
         //handler_msg("SSL recv\n");
         return SSL_read(ctx->ssl, buf, len);
     } else {
-        return recv(ctx->sockfd, buf, len, 0);
+        long size = recv(ctx->sockfd, buf, len, 0);
+    //    handler_msg("ws receive %ld bytes \n", size);
+        return size;
     }
 }
 
@@ -97,7 +99,10 @@ ssize_t ws_send(ws_ctx_t *ctx, const void *buf, size_t len) {
         //handler_msg("SSL send\n");
         return SSL_write(ctx->ssl, buf, len);
     } else {
-        return send(ctx->sockfd, buf, len, 0);
+        
+        long sent = send(ctx->sockfd, buf, len, 0);
+    //    handler_msg("ws send %d bytes (actually sent: %ld)\n", len, sent);
+        return sent;
     }
 }
 
@@ -279,7 +284,7 @@ int ws_b64_pton(const char const * src, unsigned char * dst, size_t dstlen) {
 
 int encode_hixie(u_char const *src, size_t srclength,
                  char *target, size_t targsize) {
-    int sz = 0, len = 0;
+    unsigned long sz = 0, len = 0;
     target[sz++] = '\x00';
     len = ws_b64_ntop(src, srclength, target+sz, targsize-sz);
     if (len < 0) {
@@ -294,7 +299,8 @@ int decode_hixie(char *src, size_t srclength,
                  u_char *target, size_t targsize,
                  unsigned int *opcode, unsigned int *left) {
     char *start, *end, cntstr[4];
-    int i, len, framecount = 0, retlen = 0;
+    unsigned long i, len, retlen = 0;
+    int framecount = 0;
     unsigned char chr;
     if ((src[0] != '\x00') || (src[srclength-1] != '\xff')) {
         handler_emsg("WebSocket framing error\n");
@@ -336,7 +342,7 @@ int encode_hybi(u_char const *src, size_t srclength,
                 char *target, size_t targsize, unsigned int opcode)
 {
     unsigned long long payload_offset = 2;
-    int len = 0;
+    unsigned long len = 0;
 
     if (opcode != OPCODE_TEXT && opcode != OPCODE_BINARY) {
         handler_emsg("Invalid opcode. Opcode must be 0x01 for text mode, or 0x02 for binary mode.\n");
@@ -355,6 +361,11 @@ int encode_hybi(u_char const *src, size_t srclength,
         len = srclength;
     }
 
+    if(len > targsize) {
+        handler_emsg("Sending frames larger than %d bytes not supported! requested length: %ld \n", targsize, len);
+        return -1;
+    }
+
     if (len <= 125) {
         target[1] = (char) len;
         payload_offset = 2;
@@ -363,11 +374,9 @@ int encode_hybi(u_char const *src, size_t srclength,
         *(u_short*)&(target[2]) = htons(len);
         payload_offset = 4;
     } else {
-        handler_emsg("Sending frames larger than 65535 bytes not supported\n");
-        return -1;
-        //target[1] = (char) 127;
-        //*(u_long*)&(target[2]) = htonl(b64_sz);
-        //payload_offset = 10;
+        target[1] = (char) 127;
+        *(u_long*)&(target[2]) = htonl(len);
+        payload_offset = 10;
     }
 
     if (opcode & OPCODE_TEXT) {
@@ -391,9 +400,11 @@ int decode_hybi(unsigned char *src, size_t srclength,
     unsigned char *frame, *mask, *payload, save_char;
     char cntstr[4];
     int masked = 0;
-    int i = 0, len, framecount = 0;
+    int framecount = 0;
     size_t remaining;
-    unsigned int target_offset = 0, hdr_length = 0, payload_length = 0;
+    unsigned long len, i = 0;
+    unsigned long target_offset = 0, hdr_length = 0;
+    unsigned long payload_length = 0;
     
     *left = srclength;
     frame = src;
@@ -436,9 +447,16 @@ int decode_hybi(unsigned char *src, size_t srclength,
         } else if (payload_length == 126) {
             payload_length = (frame[2] << 8) + frame[3];
             hdr_length = 4;
-        } else {
-            handler_emsg("Receiving frames larger than 65535 bytes not supported\n");
-            return -1;
+        } else { // payload_length 127
+
+            payload_length = (frame[6] << 24) + (frame[7] << 16) + (frame[8] << 8) + frame[9];
+            // allow for up to 32 bit max payload length --> the upper 4 byte have to be zero
+            if(frame[2] != 0 || frame[3] != 0 || frame[4] != 0 || frame[5] != 0) {
+
+                handler_emsg("Receiving frames larger than 2^32 bytes not supported\n");
+                return -1;
+            }
+            hdr_length = 10;
         }
         if ((hdr_length + 4*masked + payload_length) > remaining) {
             continue;
@@ -461,9 +479,6 @@ int decode_hybi(unsigned char *src, size_t srclength,
             return -1;
         }
 
-        // Terminate with a null for base64 decode
-        save_char = payload[payload_length];
-        payload[payload_length] = '\0';
 
         // unmask the data
         mask = payload - 4;
@@ -472,19 +487,26 @@ int decode_hybi(unsigned char *src, size_t srclength,
         }
 
         if (*opcode & OPCODE_TEXT) {
+            // Terminate with a null for base64 decode
+            save_char = payload[payload_length];
+            payload[payload_length] = '\0';
+
+
             // base64 decode the data
             len = ws_b64_pton((const char*)payload, target+target_offset, targsize);
+
+            
+            // Restore the first character of the next frame
+            payload[payload_length] = save_char;
+            if (len < 0) {
+                handler_emsg("Base64 decode error code %ld", len);
+                return len;
+            }
         } else {
             memcpy(target+target_offset, payload, payload_length);
             len = payload_length;
         }
 
-        // Restore the first character of the next frame
-        payload[payload_length] = save_char;
-        if (len < 0) {
-            handler_emsg("Base64 decode error code %d", len);
-            return len;
-        }
         target_offset += len;
 
         //printf("    len %d, raw %s\n", len, frame);
