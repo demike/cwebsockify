@@ -12,7 +12,7 @@ WORKDIR /cwebsockify
 
 # ======= build cwebsockify ========
 
-RUN cmake .
+RUN cmake -DCMAKE_BUILD_TYPE=Release .
 RUN make
 
 
