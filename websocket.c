@@ -162,7 +162,7 @@ ws_ctx_t *ws_socket_ssl(ws_ctx_t *ctx, int socket, char * certfile, char * keyfi
 
     }
 
-    ctx->ssl_ctx = SSL_CTX_new(TLSv1_server_method());
+    ctx->ssl_ctx = SSL_CTX_new(TLS_method());
     if (ctx->ssl_ctx == NULL) {
         ERR_print_errors_fp(stderr);
         fatal("Failed to configure SSL context");
