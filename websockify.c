@@ -12,6 +12,7 @@
 #include <limits.h>
 #include <getopt.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
@@ -40,6 +41,7 @@ char USAGE[] = "Usage: [options] " \
                "  --run-once         handle a single WebSocket connection and exit\n" \
                "  --cert CERT        SSL certificate file\n" \
                "  --key KEY          SSL key file (if separate from cert)\n" \
+               "  --timeout SECONDS  limit time to connect to target host (0 disables)\n" \
                "  --ssl-only         disallow non-encrypted connections";
 
 #define usage(fmt, args...) \
@@ -49,9 +51,83 @@ char USAGE[] = "Usage: [options] " \
 
 char target_host[256];
 int target_port;
+int target_connect_timeout = 0;
 
 extern int pipe_error;
 extern settings_t settings;
+
+int connect_with_timeout(int sock, const struct sockaddr *addr,
+                         socklen_t addrlen, int timeout)
+{
+    int flags, ret, sock_error, saved_errno;
+    socklen_t sock_error_len;
+    fd_set wlist, elist;
+    struct timeval tv;
+
+    if (timeout <= 0) {
+        return connect(sock, addr, addrlen);
+    }
+
+    flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+
+    if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return -1;
+    }
+
+    ret = connect(sock, addr, addrlen);
+    if (ret == 0) {
+        return fcntl(sock, F_SETFL, flags);
+    }
+
+    if (errno != EINPROGRESS) {
+        saved_errno = errno;
+        fcntl(sock, F_SETFL, flags);
+        errno = saved_errno;
+        return -1;
+    }
+
+    FD_ZERO(&wlist);
+    FD_ZERO(&elist);
+    FD_SET(sock, &wlist);
+    FD_SET(sock, &elist);
+
+    tv.tv_sec = timeout;
+    tv.tv_usec = 0;
+
+    ret = select(sock + 1, NULL, &wlist, &elist, &tv);
+    if (ret == 0) {
+        fcntl(sock, F_SETFL, flags);
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    if (ret < 0) {
+        saved_errno = errno;
+        fcntl(sock, F_SETFL, flags);
+        errno = saved_errno;
+        return -1;
+    }
+
+    sock_error = 0;
+    sock_error_len = sizeof(sock_error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR,
+                   &sock_error, &sock_error_len) < 0) {
+        saved_errno = errno;
+        fcntl(sock, F_SETFL, flags);
+        errno = saved_errno;
+        return -1;
+    }
+
+    if (sock_error != 0) {
+        fcntl(sock, F_SETFL, flags);
+        errno = sock_error;
+        return -1;
+    }
+
+    return fcntl(sock, F_SETFL, flags);
+}
 
 void do_proxy(ws_ctx_t *ws_ctx, int target) {
     fd_set rlist, wlist, elist;
@@ -259,7 +335,8 @@ void proxy_handler(ws_ctx_t *ws_ctx) {
                      strerror(errno));
     }
 
-    if (connect(tsock, (struct sockaddr *) &taddr, sizeof(taddr)) < 0) {
+    if (connect_with_timeout(tsock, (struct sockaddr *) &taddr,
+                             sizeof(taddr), target_connect_timeout) < 0) {
         handler_emsg("Could not connect to target: %s\n",
                      strerror(errno));
         close(tsock);
@@ -290,6 +367,7 @@ int main(int argc, char *argv[])
         {"run-once",   no_argument,       0,           'r'},
         {"cert",       required_argument, 0,           'c'},
         {"key",        required_argument, 0,           'k'},
+        {"timeout",    required_argument, 0,           't'},
         {0, 0, 0, 0}
     };
 
@@ -301,7 +379,7 @@ int main(int argc, char *argv[])
     settings.key = "";
 
     while (1) {
-        c = getopt_long (argc, argv, "vDrc:k:",
+        c = getopt_long (argc, argv, "vDrc:k:t:",
                          long_options, &option_index);
 
         /* Detect the end */
@@ -333,6 +411,20 @@ int main(int argc, char *argv[])
                     usage("No key file at %s\n", optarg);
                 }
                 break;
+            case 't':
+            {
+                char *end = NULL;
+                long timeout;
+
+                errno = 0;
+                timeout = strtol(optarg, &end, 10);
+                if ((errno != 0) || (end == optarg) || (*end != '\0') ||
+                    (timeout < 0) || (timeout > INT_MAX)) {
+                    usage("Invalid timeout value: %s\n", optarg);
+                }
+                target_connect_timeout = (int) timeout;
+                break;
+            }
             default:
                 usage("");
         }
