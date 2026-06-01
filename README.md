@@ -7,3 +7,4 @@ It Retains the license found in https://github.com/novnc/websockify-other/blob/m
 - In addition to the original code it adds support for bigger payloads
 - a cmake build script
 - docker build support
+- support of TCP connection timeout
